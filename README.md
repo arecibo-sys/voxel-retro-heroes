@@ -6,7 +6,15 @@ Playable single-file browser game — no build step, no assets. Procedural voxel
 
 ## Play
 
-Open `index.html` in a modern browser (Chrome, Firefox, Safari, Edge), or serve locally:
+**▶ Live game (GitHub Pages):** https://arecibo-sys.github.io/voxel-retro-heroes/
+
+Open that link and hit **Press Start**.
+
+Repo: https://github.com/arecibo-sys/voxel-retro-heroes
+
+### Local
+
+Open `index.html` in a modern browser (Chrome, Firefox, Safari, Edge), or serve:
 
 ```bash
 npx --yes serve .

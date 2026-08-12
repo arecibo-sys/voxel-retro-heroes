@@ -660,7 +660,8 @@ function rebuildHeroMesh() {
   }
   const hero = HEROES[state.heroIndex];
   const frame = hero.cycle ? state.blockFrame : (state.chompAnim > 0 ? 1 : 0);
-  p.heroMesh = makeVoxelGroup(heroCells(hero, frame), 0.32);
+  // Player voxel scale kept smaller than invader ranks for silhouette balance
+  p.heroMesh = makeVoxelGroup(heroCells(hero, frame), 0.20);
   p.mesh.add(p.heroMesh);
   if (p.sadMesh) p.sadMesh.visible = false;
   if (p.heroMesh) p.heroMesh.visible = !state.sad || state.sad.phase === 'flash';
@@ -680,8 +681,8 @@ function createPlayer() {
   state.player.x = 0;
   state.player.z = 10;
 
-  // sad mesh ready
-  const sad = makeVoxelGroup(sadSmileyCells(), 0.38);
+  // sad mesh ready (matches smaller hero scale)
+  const sad = makeVoxelGroup(sadSmileyCells(), 0.24);
   sad.visible = false;
   root.add(sad);
   state.player.sadMesh = sad;
@@ -801,36 +802,38 @@ function firePlayer() {
   state.fireCd = hero.fireRate;
   Audio.shoot();
 
-  const origin = new THREE.Vector3(state.player.x, 1.2, state.player.z - 0.6);
+  // Spawn slightly above bunker height so stock bolts clear barriers to the ranks
+  const origin = new THREE.Vector3(state.player.x, 1.55, state.player.z - 0.45);
 
-  const mkShot = (dx, dz, speed, color, kind, arc = 0) => {
+  const mkShot = (dx, speed, color, kind, arc = 0, life = 3.0) => {
     const mesh = new THREE.Mesh(
       boxGeo,
       mat(color, color, 0.85)
     );
-    mesh.scale.set(0.18, 0.18, 0.45);
+    mesh.scale.set(0.16, 0.16, 0.55);
     mesh.position.copy(origin);
     scene.add(mesh);
     state.projectiles.push({
       mesh, x: origin.x, y: origin.y, z: origin.z,
-      vx: dx, vy: arc, vz: -speed, kind, life: 2.5, damage: 1
+      vx: dx, vy: arc, vz: -speed, kind, life, damage: 1
     });
   };
 
   if (hero.shot === 'bolt') {
-    mkShot(0, 0, 22, hero.color, 'bolt');
+    mkShot(0, 28, hero.color, 'bolt');
   } else if (hero.shot === 'chomp') {
-    mkShot(0, 0, 18, hero.color, 'chomp');
-    // short range — shorter life
-    state.projectiles[state.projectiles.length - 1].life = 0.35;
-    state.projectiles[state.projectiles.length - 1].mesh.scale.set(0.45, 0.45, 0.45);
+    // Short-range but long enough to hit the nearest rank once it marches in
+    mkShot(0, 26, hero.color, 'chomp', 0, 0.85);
+    state.projectiles[state.projectiles.length - 1].mesh.scale.set(0.4, 0.4, 0.4);
   } else if (hero.shot === 'lob') {
-    mkShot(0, 0, 12, hero.accent, 'lob', 8);
-    state.projectiles[state.projectiles.length - 1].mesh.scale.set(0.35, 0.35, 0.35);
+    // Gentle arc that stays airborne across the arena
+    mkShot(0, 16, hero.accent, 'lob', 6.5, 3.5);
+    state.projectiles[state.projectiles.length - 1].mesh.scale.set(0.32, 0.32, 0.32);
   } else if (hero.shot === 'spread') {
-    mkShot(-4, 0, 20, hero.color, 'spread');
-    mkShot(0, 0, 22, hero.accent, 'spread');
-    mkShot(4, 0, 20, hero.color, 'spread');
+    // Mild lateral fan so side bolts still cross the formation
+    mkShot(-1.6, 26, hero.color, 'spread');
+    mkShot(0, 28, hero.accent, 'spread');
+    mkShot(1.6, 26, hero.color, 'spread');
   }
 }
 
@@ -1201,31 +1204,51 @@ function update(dt) {
     }
   }
 
-  // Player projectiles
+  // Player projectiles — swept XZ hit so fast bolts cannot tunnel past ranks
   for (let i = state.projectiles.length - 1; i >= 0; i--) {
     const p = state.projectiles[i];
     p.life -= dt;
+    const prevX = p.x;
+    const prevZ = p.z;
     p.x += p.vx * dt;
     p.y += p.vy * dt;
     p.z += p.vz * dt;
-    if (p.kind === 'lob') p.vy -= 18 * dt;
+    if (p.kind === 'lob') p.vy -= 12 * dt; // gentler gravity so lobs reach the ranks
+    // Keep lob airborne until it clears the arena rather than dying mid-flight
+    if (p.kind === 'lob' && p.y < 0.35) {
+      p.y = 0.35;
+      p.vy = Math.abs(p.vy) * 0.35;
+    }
     p.mesh.position.set(p.x, Math.max(0.3, p.y), p.z);
 
-    let dead = p.life <= 0 || p.z < -ARENA.d / 2 || p.y < 0;
-    // vs invaders
+    let dead = p.life <= 0 || p.z < -ARENA.d / 2 - 1;
+    if (p.kind !== 'lob' && p.y < -0.5) dead = true;
+
+    // vs invaders (AABB along the segment from prev → current)
     if (!dead) {
+      const hitR = p.kind === 'chomp' ? 1.15 : 1.05;
+      const zMin = Math.min(prevZ, p.z) - 0.15;
+      const zMax = Math.max(prevZ, p.z) + 0.15;
+      const xMin = Math.min(prevX, p.x) - hitR;
+      const xMax = Math.max(prevX, p.x) + hitR;
       for (const inv of state.invaders) {
         if (!inv.alive) continue;
-        if (Math.abs(p.x - inv.x) < 0.7 && Math.abs(p.z - inv.z) < 0.7) {
-          killInvader(inv);
-          dead = true;
-          break;
+        if (inv.z >= zMin && inv.z <= zMax && inv.x >= xMin && inv.x <= xMax) {
+          // Prefer nearest on the flight path when several overlap the segment
+          const dx = inv.x - p.x;
+          const dz = inv.z - p.z;
+          if (dx * dx + dz * dz <= hitR * hitR * 2.4 ||
+              (inv.z >= zMin && inv.z <= zMax && Math.abs(inv.x - (prevX + p.x) * 0.5) <= hitR)) {
+            killInvader(inv);
+            dead = true;
+            break;
+          }
         }
       }
     }
     // vs ufo
     if (!dead && state.ufo && state.ufo.alive) {
-      if (Math.abs(p.x - state.ufo.x) < 1.2 && Math.abs(p.z - state.ufo.z) < 0.8 && p.y > 3) {
+      if (Math.abs(p.x - state.ufo.x) < 1.4 && Math.abs(p.z - state.ufo.z) < 1.0 && p.y > 2.5) {
         state.ufo.alive = false;
         scene.remove(state.ufo.mesh);
         state.score += 100;
@@ -1236,27 +1259,30 @@ function update(dt) {
         dead = true;
       }
     }
-    // vs bunkers
-    if (!dead) {
+    // vs bunkers — only when the shot is low enough to clip the barrier (high bolts clear)
+    if (!dead && p.y < 1.15) {
       for (const b of state.bunkers) {
-        if (Math.abs(p.x - b.x) < 1.2 && Math.abs(p.z - b.z) < 0.6) {
-          // damage nearest voxel
-          let hit = false;
-          for (const v of b.voxels) {
-            if (!v.mesh.visible) continue;
-            const wx = b.x + v.mesh.position.x;
-            const wy = v.mesh.position.y;
-            if (Math.abs(p.x - wx) < 0.35 && Math.abs(p.y - wy) < 0.4) {
-              v.hp -= 1;
-              if (v.hp <= 0) v.mesh.visible = false;
-              else v.mesh.material = mat(0x2a3a28, 0x2a3a28, 0.02);
-              hit = true;
-              dead = true;
-              break;
-            }
-          }
-          if (hit) break;
+        const zNear = Math.min(prevZ, p.z);
+        const zFar = Math.max(prevZ, p.z);
+        if (b.z < zNear - 0.35 || b.z > zFar + 0.35) {
+          if (Math.abs(p.z - b.z) >= 0.55) continue;
         }
+        if (Math.abs(p.x - b.x) > 1.3) continue;
+        let hit = false;
+        for (const v of b.voxels) {
+          if (!v.mesh.visible) continue;
+          const wx = b.x + v.mesh.position.x;
+          const wy = v.mesh.position.y;
+          if (Math.abs(p.x - wx) < 0.4 && Math.abs(p.y - wy) < 0.45) {
+            v.hp -= 1;
+            if (v.hp <= 0) v.mesh.visible = false;
+            else v.mesh.material = mat(0x2a3a28, 0x2a3a28, 0.02);
+            hit = true;
+            dead = true;
+            break;
+          }
+        }
+        if (hit) break;
       }
     }
     if (dead) {
